@@ -1,0 +1,23 @@
+<!-- socket-server/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Socket.io Test</title>
+    <script src="/socket.io/socket.io.js"></script>
+  </head>
+  <body>
+    <h1>Socket.io Test</h1>
+    <script>
+      const socket = io(); // This should work if the script is loaded correctly
+
+      socket.on("connect", () => {
+        console.log("Connected to socket server");
+      });
+
+      // Example of sending a message
+      socket.emit("joinRoom", "testRoom");
+    </script>
+  </body>
+</html>
