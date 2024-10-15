@@ -49,6 +49,7 @@ const HomePage = () => {
   const [isLocalChange, setIsLocalChange] = useState(false);
   const [lastUpdateTime, setLastUpdateTime] = useState(0);
   const syncThreshold = 2; // seconds
+  const [isCreator, setIsCreator] = useState(false); // Track if the user is the creator
 
   const toggleMenu = () => {
     setIsMenuOpen(!isMenuOpen);
@@ -182,7 +183,7 @@ const HomePage = () => {
         setError("Failed to connect to the server. Please try again later.");
       });
 
-      socketRef.current.emit("joinRoom", roomId);
+      socketRef.current.emit("joinRoom", roomId, isCreator);
 
       socketRef.current.on("chatMessage", (message: ChatMessage) => {
         setMessages((prevMessages) => [...prevMessages, message]);
@@ -227,9 +228,7 @@ const HomePage = () => {
         socketRef.current?.disconnect();
       };
     }
-  }, [roomId, router]);
-
-  //
+  }, [roomId, router, isCreator]);
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -241,12 +240,6 @@ const HomePage = () => {
       socketRef.current.emit("chatMessage", { roomId, message });
       setInputMessage("");
     }
-  };
-  const test = () => {
-    socketRef.current?.on("playerStateUpdate", (state: PlayerState) => {
-      console.log("Received playerStateUpdate:", state);
-    });
-    console.log("Called");
   };
 
   const debouncedUpdatePlayerState = useCallback(
@@ -327,6 +320,29 @@ const HomePage = () => {
     return () => clearInterval(syncInterval);
   }, [synchronizeVideo]);
 
+  useEffect(() => {
+    const syncInterval = setInterval(() => {
+      if (playerRef.current) {
+        const currentTime = playerRef.current.getCurrentTime();
+        const isPlaying =
+          playerRef.current.getPlayerState() === YouTube.PlayerState.PLAYING;
+
+        // Emit the current state to the server
+        socketRef.current?.emit("playerStateChange", {
+          roomId,
+          state: {
+            videoId: playerState.videoId,
+            isPlaying,
+            currentTime,
+            isSystemUpdate: false,
+          },
+        });
+      }
+    }, 2000); // Sync every 2 seconds
+
+    return () => clearInterval(syncInterval);
+  }, [playerState.videoId]);
+
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col">
       {/* Navbar */}
@@ -352,7 +368,6 @@ const HomePage = () => {
             <Search className="absolute left-2 top-1/2 cursor-pointer transform -translate-y-1/2 text-gray-00" />
           </div>
         </div>
-        <button onClick={test}>Hello World</button>
         <div className="flex items-center text-gray-400 mr-8">
           <Users className="mr-2" />
           <span>{userCount}</span>
@@ -372,7 +387,7 @@ const HomePage = () => {
                   height: "100%",
                   playerVars: {
                     autoplay: 1,
-                    controls: 1,
+                    controls: 1, // Show controls for all users
                     modestbranding: 1,
                     rel: 0,
                   },
@@ -394,22 +409,6 @@ const HomePage = () => {
 
         {/* Playlist and Chat section */}
         <div className="w-full md:w-1/4 bg-gray-800 p-4 overflow-hidden">
-          {/* <div className="mb-4">
-            <input
-              type="text"
-              placeholder="Paste YouTube URL here"
-              className="w-full p-2 bg-gray-700 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              value={videoUrl}
-              onChange={(e) => setVideoUrl(e.target.value)}
-            />
-            <button
-              onClick={seeMessage}
-              className="mt-2 w-full bg-blue-600 text-white px-4 py-2 rounded"
-            >
-              Add to Playlist
-            </button>
-          </div> */}
-
           {error && (
             <Alert variant="destructive" className="mb-4">
               <AlertTitle>Error</AlertTitle>
