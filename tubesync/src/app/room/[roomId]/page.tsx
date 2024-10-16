@@ -229,7 +229,7 @@ const HomePage = () => {
   };
 
   const fetchVideoInfo = async (videoId: string): Promise<Video> => {
-    const apiKey = process.env.NEXT_PUBLIC_YOUTUBE_API_KEY;
+    const apiKey = "AIzaSyDWCZRMn07n-vZ4-yfgbzrb961ujGStUxQ"; // Replace with your actual YouTube API key
     const response = await fetch(
       `https://www.googleapis.com/youtube/v3/videos?id=${videoId}&key=${apiKey}&part=snippet`
     );
@@ -261,6 +261,189 @@ const HomePage = () => {
       updatePlayerState(null, false, 0);
     }
   };
+
+  useEffect(() => {
+    const storedUsername = localStorage.getItem("username");
+    if (storedUsername) {
+      setUsername(storedUsername);
+    } else {
+      const usernameInput = prompt("Please enter your username:");
+      if (usernameInput) {
+        setUsername(usernameInput);
+        localStorage.setItem("username", usernameInput);
+      }
+    }
+
+    if (!roomId) {
+      const newRoomId = Math.random().toString(36).substring(7);
+      router.push(`/room/${newRoomId}`);
+    } else {
+      socketRef.current = io("https://tubesync-production.up.railway.app");
+
+      socketRef.current.on("connect_error", (err) => {
+        console.error("Socket connection error:", err);
+        setError("Failed to connect to the server. Please try again later.");
+      });
+
+      socketRef.current.emit("joinRoom", roomId, isCreator);
+
+      socketRef.current.on("chatMessage", (message: ChatMessage) => {
+        setMessages((prevMessages) => [...prevMessages, message]);
+      });
+
+      socketRef.current.on("userCount", (count: number) => {
+        setUserCount(count);
+      });
+
+      socketRef.current.on("playlistUpdate", (updatedPlaylist: Video[]) => {
+        setPlaylist(updatedPlaylist);
+        if (updatedPlaylist.length > 0 && !currentVideo) {
+          setCurrentVideo(updatedPlaylist[0]);
+          updatePlayerState(updatedPlaylist[0].id, true, 0);
+        }
+      });
+
+      socketRef.current.on("playerStateUpdate", (state: PlayerState) => {
+        console.log("Received playerStateUpdate:", state);
+        if (!isLocalChange) {
+          const currentTime = playerRef.current?.getCurrentTime() || 0;
+          if (
+            Math.abs(Math.floor(currentTime) - Math.floor(state.currentTime)) >
+            syncThreshold
+          ) {
+            playerRef.current?.seekTo(state.currentTime);
+          }
+
+          setPlayerState(state);
+          if (playerRef.current) {
+            if (state.isPlaying) {
+              playerRef.current.playVideo();
+            } else {
+              playerRef.current.pauseVideo();
+            }
+          }
+        }
+        setIsLocalChange(false);
+      });
+
+      return () => {
+        socketRef.current?.disconnect();
+      };
+    }
+  }, [roomId, router, isCreator]);
+
+  const handleSendMessage = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (inputMessage.trim() && socketRef.current) {
+      const message: ChatMessage = {
+        user: username || "Anonymous",
+        text: inputMessage.trim(),
+      };
+      socketRef.current.emit("chatMessage", { roomId, message });
+      setInputMessage("");
+    }
+  };
+
+  const debouncedUpdatePlayerState = useCallback(
+    debounce((state: PlayerState) => {
+      console.log("Debounced player state update:", state);
+      socketRef.current?.emit("playerStateChange", { roomId, state });
+    }, 300),
+    [roomId]
+  );
+
+  const updatePlayerState = (
+    videoId: string | null,
+    isPlaying: boolean,
+    currentTime: number
+  ) => {
+    setIsLocalChange(true);
+    const newState: PlayerState = { videoId, isPlaying, currentTime };
+    setPlayerState(newState);
+    debouncedUpdatePlayerState(newState);
+  };
+
+  const onPlayerReady = (event: any) => {
+    playerRef.current = event.target;
+    console.log("Player ready");
+  };
+
+  const onPlayerStateChange = (event: any) => {
+    const playerStatus = event.data; // This should be the player state
+    const currentTime = event.target.getCurrentTime();
+    console.log(
+      `Player state changed: ${playerStatus}, Current time: ${currentTime}`
+    );
+
+    // Determine if the video is playing or paused
+    const isPlaying = playerStatus === YouTube.PlayerState.PLAYING;
+
+    // Emit player state change to the server immediately
+    const newState: PlayerState = {
+      videoId: currentVideo?.id || null,
+      isPlaying: isPlaying, // Set isPlaying based on the player status
+      currentTime: currentTime,
+    };
+
+    // Emit player state change to the server
+    socketRef.current?.emit("playerStateChange", { roomId, state: newState });
+
+    // Update local player state
+    setPlayerState((prevState) => ({
+      ...prevState,
+      isPlaying: isPlaying, // Update local state based on the player status
+      currentTime: currentTime,
+    }));
+  };
+
+  const synchronizeVideo = useCallback(() => {
+    if (playerRef.current && socketRef.current) {
+      const currentTime = playerRef.current.getCurrentTime();
+      const isPlaying =
+        playerRef.current.getPlayerState() === YouTube.PlayerState.PLAYING;
+      const videoId = currentVideo?.id || null;
+
+      if (Date.now() - lastUpdateTime > 5000) {
+        // Only sync every 5 seconds
+        console.log(
+          `Syncing video. VideoID: ${videoId} Time: ${currentTime}, Playing: ${isPlaying}`
+        );
+        socketRef.current?.emit("playerStateChange", {
+          roomId,
+          state: { videoId, isPlaying, currentTime },
+        });
+        setLastUpdateTime(Date.now());
+      }
+    }
+  }, [roomId, currentVideo, lastUpdateTime]);
+
+  useEffect(() => {
+    const syncInterval = setInterval(synchronizeVideo, 2000);
+    return () => clearInterval(syncInterval);
+  }, [synchronizeVideo]);
+
+  useEffect(() => {
+    const syncInterval = setInterval(() => {
+      if (playerRef.current) {
+        const currentTime = playerRef.current.getCurrentTime();
+        const isPlaying =
+          playerRef.current.getPlayerState() === YouTube.PlayerState.PLAYING;
+
+        // Emit the current state to the server
+        socketRef.current?.emit("playerStateChange", {
+          roomId,
+          state: {
+            videoId: playerState.videoId,
+            isPlaying,
+            currentTime,
+            isSystemUpdate: false,
+          },
+        });
+      }
+    }, 2000); // Sync every 2 seconds
+
+    return () => clearInterval(syncInterval);
+  }, [playerState.videoId]);
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col">
