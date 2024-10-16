@@ -176,7 +176,7 @@ const HomePage = () => {
       const newRoomId = Math.random().toString(36).substring(7);
       router.push(`/room/${newRoomId}`);
     } else {
-      socketRef.current = io("http://localhost:3001");
+      socketRef.current = io("https://tubesync-production.up.railway.app");
 
       socketRef.current.on("connect_error", (err) => {
         console.error("Socket connection error:", err);
