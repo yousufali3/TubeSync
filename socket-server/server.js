@@ -12,47 +12,41 @@ const io = new Server(server, {
   },
 });
 
-// Serve the index.html file
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
-
-// Store users and video states for each room
-const roomUsers = {};
-const roomVideoStates = {};
-const roomCreators = {}; // Track room creators
+// Store room data
+const rooms = new Map();
 
 io.on("connection", (socket) => {
   console.log("New socket connected:", socket.id);
 
-  socket.on("joinRoom", (roomId, isCreator) => {
-    console.log(`User ${socket.id} joined room: ${roomId}`);
+  socket.on("joinRoom", ({ roomId, username, userId }) => {
+    console.log(`User ${username} (${userId}) joined room: ${roomId}`);
     socket.join(roomId);
 
-    if (!roomUsers[roomId]) {
-      roomUsers[roomId] = [];
-      roomVideoStates[roomId] = {
-        videoId: null,
-        isPlaying: false,
-        currentTime: 0,
-      };
-      console.log(`Room created: ${roomId}`);
+    if (!rooms.has(roomId)) {
+      // New room, set up room data
+      rooms.set(roomId, {
+        creator: userId, // Set the creator to the unique user ID
+        users: new Set([userId]),
+        playlist: [],
+        playerState: {
+          videoId: null,
+          isPlaying: false,
+          currentTime: 0,
+        },
+      });
+      socket.emit("roomJoined", { isCreator: true });
+    } else {
+      // Existing room, add user
+      const room = rooms.get(roomId);
+      room.users.add(userId);
+      const isCreator = room.creator === userId; // Check if the current user is the creator
+      socket.emit("roomJoined", { isCreator });
     }
 
-    roomUsers[roomId].push(socket.id);
-
-    // Set the creator of the room
-    if (isCreator) {
-      roomCreators[roomId] = socket.id;
-    }
-
-    socket.to(roomId).emit("userJoined", {
-      message: `User ${socket.id} has joined the room.`,
-      users: roomUsers[roomId],
-    });
-
-    io.to(roomId).emit("userCount", roomUsers[roomId].length);
-    socket.emit("playerStateUpdate", roomVideoStates[roomId]);
+    const room = rooms.get(roomId);
+    io.to(roomId).emit("userCount", room.users.size);
+    socket.emit("playlistUpdate", room.playlist);
+    socket.emit("playerStateUpdate", room.playerState);
   });
 
   socket.on("chatMessage", ({ roomId, message }) => {
@@ -61,70 +55,66 @@ io.on("connection", (socket) => {
   });
 
   socket.on("updatePlaylist", ({ roomId, playlist }) => {
-    if (roomCreators[roomId] !== socket.id) {
-      console.log(
-        `User ${socket.id} attempted to update playlist without permission.`
-      );
-      return; // Prevent non-creators from updating the playlist
-    }
+    const room = rooms.get(roomId);
+    if (room && room.creator === socket.id) {
+      console.log(`Updating playlist for room: ${roomId}`);
+      room.playlist = playlist;
+      io.to(roomId).emit("playlistUpdate", playlist);
 
-    console.log(`Received updatePlaylist for room: ${roomId}`);
-    console.log("New Playlist:", playlist);
-    io.to(roomId).emit("playlistUpdate", playlist);
-
-    if (playlist.length > 0 && !roomVideoStates[roomId].videoId) {
-      roomVideoStates[roomId].videoId = playlist[0].id;
-      io.to(roomId).emit("playerStateUpdate", roomVideoStates[roomId]);
+      if (playlist.length > 0 && !room.playerState.videoId) {
+        room.playerState.videoId = playlist[0].id;
+        io.to(roomId).emit("playerStateUpdate", room.playerState);
+      }
+    } else {
+      console.log(`Unauthorized playlist update attempt in room: ${roomId}`);
     }
   });
 
   socket.on("playerStateChange", ({ roomId, state }) => {
-    if (roomCreators[roomId] !== socket.id) {
+    const room = rooms.get(roomId);
+    if (room && room.creator === socket.id) {
+      console.log(`Updating player state for room ${roomId}:`, state);
+      room.playerState = state;
+      socket.to(roomId).emit("playerStateUpdate", state);
+    } else {
       console.log(
-        `User ${socket.id} attempted to change player state without permission.`
+        `Unauthorized player state change attempt in room: ${roomId}`
       );
-      return; // Prevent non-creators from changing player state
     }
-
-    console.log(`Player state change received for room ${roomId}:`, state);
-    roomVideoStates[roomId] = state;
-    io.to(roomId).emit("playerStateUpdate", state); // Emit to all clients
   });
 
-  socket.on("leaveRoom", (roomId) => {
-    handleUserLeaving(socket, roomId);
+  socket.on("requestSync", ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room) {
+      socket.emit("playerStateUpdate", room.playerState);
+    }
   });
 
-  socket.on("disconnect", () => {
+  const handleDisconnect = () => {
     console.log("User disconnected:", socket.id);
-    for (const roomId in roomUsers) {
-      if (roomUsers[roomId].includes(socket.id)) {
-        handleUserLeaving(socket, roomId);
+    for (const [roomId, room] of rooms.entries()) {
+      if (room.users.has(socket.id)) {
+        room.users.delete(socket.id);
+        io.to(roomId).emit("userCount", room.users.size);
+
+        if (room.creator === socket.id) {
+          // Creator left, do not change the creator
+          console.log(
+            `Creator ${socket.id} left the room ${roomId}, but the creator will not change.`
+          );
+        }
+
+        if (room.users.size === 0) {
+          rooms.delete(roomId);
+          console.log(`Room ${roomId} closed due to no users`);
+        }
       }
     }
-  });
+  };
+
+  socket.on("leaveRoom", handleDisconnect);
+  socket.on("disconnect", handleDisconnect);
 });
-
-function handleUserLeaving(socket, roomId) {
-  console.log(`User ${socket.id} left room: ${roomId}`);
-
-  if (roomUsers[roomId]) {
-    roomUsers[roomId] = roomUsers[roomId].filter((id) => id !== socket.id);
-
-    socket.to(roomId).emit("userLeft", {
-      message: `User ${socket.id} has left the room.`,
-      users: roomUsers[roomId],
-    });
-    io.to(roomId).emit("userCount", roomUsers[roomId].length);
-
-    if (roomUsers[roomId].length === 0) {
-      delete roomUsers[roomId];
-      delete roomVideoStates[roomId]; // Clean up video states as well
-      delete roomCreators[roomId]; // Clean up creator as well
-      console.log(`Room ${roomId} is now empty and has been cleaned up.`);
-    }
-  }
-}
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {

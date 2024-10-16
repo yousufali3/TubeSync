@@ -2,12 +2,21 @@
 import { useRouter } from "next/navigation"; // Import useRouter for navigation
 import { Play } from "lucide-react"; // Importing the required icons
 import Navbar from "./components/Navbar";
+import { useState } from "react"; // Import useState for managing state
+
 const LandingPage = () => {
   const router = useRouter(); // Initialize the router
+  const [roomIdInput, setRoomIdInput] = useState(""); // New state for room ID input
 
   const handleCreateRoom = () => {
     const newRoomId = Math.random().toString(36).substring(2, 10); // Generate a random room ID
     router.push(`/room/${newRoomId}`); // Navigate to the new room
+  };
+
+  const handleJoinRoom = () => {
+    if (roomIdInput) {
+      router.push(`/room/${roomIdInput}`); // Navigate to the specified room
+    }
   };
 
   return (
@@ -30,6 +39,22 @@ const LandingPage = () => {
           <br />
           YouTube videos together.
         </h2>
+
+        <div className="text-center mb-4">
+          <input
+            type="text"
+            placeholder="Enter Room ID to Join"
+            value={roomIdInput}
+            onChange={(e) => setRoomIdInput(e.target.value)}
+            className="p-2 bg-gray-700 rounded mb-2 mr-2"
+          />
+          <button
+            onClick={handleJoinRoom}
+            className="bg-blue-600 text-white px-4 py-2 rounded"
+          >
+            Join Room
+          </button>
+        </div>
 
         <div className="text-center">
           <button
