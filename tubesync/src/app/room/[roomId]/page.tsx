@@ -49,7 +49,7 @@ const HomePage = () => {
 
   useEffect(() => {
     const storedUsername = sessionStorage.getItem("username");
-    const storedCreatorId = sessionStorage.getItem("creatorId");
+    let uniqueId = sessionStorage.getItem("creatorId");
 
     if (storedUsername) {
       setUsername(storedUsername);
@@ -58,14 +58,12 @@ const HomePage = () => {
       if (usernameInput) {
         setUsername(usernameInput);
         sessionStorage.setItem("username", usernameInput);
-
-        // Check if creatorId already exists, if not generate a new one
-        let uniqueId = sessionStorage.getItem("creatorId");
-        if (!uniqueId) {
-          uniqueId = Math.random().toString(36).substring(2, 15);
-          sessionStorage.setItem("creatorId", uniqueId);
-        }
       }
+    }
+
+    if (!uniqueId) {
+      uniqueId = Math.random().toString(36).substring(2, 15);
+      sessionStorage.setItem("creatorId", uniqueId);
     }
 
     if (!roomId) {
@@ -75,12 +73,15 @@ const HomePage = () => {
       socketRef.current = io("http://localhost:3001");
 
       socketRef.current.on("connect", () => {
-        socketRef.current?.emit("joinRoom", { roomId, username });
+        socketRef.current?.emit("joinRoom", {
+          roomId,
+          username,
+          userId: uniqueId,
+        });
       });
 
       socketRef.current.on("roomJoined", (data: { isCreator: boolean }) => {
-        let uniqueId = sessionStorage.getItem("creatorId");
-        setIsCreator(data.isCreator || storedCreatorId === uniqueId);
+        setIsCreator(data.isCreator);
       });
 
       socketRef.current.on("chatMessage", (message: ChatMessage) => {
@@ -112,6 +113,10 @@ const HomePage = () => {
             playerRef.current.seekTo(state.currentTime);
           }
         }
+      });
+
+      socketRef.current.on("creatorChanged", ({ newCreator }) => {
+        setIsCreator(sessionStorage.getItem("creatorId") === newCreator);
       });
 
       // Request initial sync
@@ -159,6 +164,7 @@ const HomePage = () => {
       socketRef.current?.emit("updatePlaylist", {
         roomId,
         playlist: updatedPlaylist,
+        userId: sessionStorage.getItem("creatorId"),
       });
       if (!currentVideo) {
         setCurrentVideo(video);
@@ -176,6 +182,7 @@ const HomePage = () => {
     socketRef.current?.emit("updatePlaylist", {
       roomId,
       playlist: updatedPlaylist,
+      userId: sessionStorage.getItem("creatorId"),
     });
     if (currentVideo && currentVideo.id === videoId) {
       const newCurrentVideo = updatedPlaylist[0] || null;
@@ -192,7 +199,11 @@ const HomePage = () => {
     if (!isCreator) return;
     const newState: PlayerState = { videoId, isPlaying, currentTime };
     setPlayerState(newState);
-    socketRef.current?.emit("playerStateChange", { roomId, state: newState });
+    socketRef.current?.emit("playerStateChange", {
+      roomId,
+      state: newState,
+      userId: sessionStorage.getItem("creatorId"),
+    });
   };
 
   const onPlayerReady = (event: any) => {
@@ -229,7 +240,7 @@ const HomePage = () => {
   };
 
   const fetchVideoInfo = async (videoId: string): Promise<Video> => {
-    const apiKey = "AIzaSyDWCZRMn07n-vZ4-yfgbzrb961ujGStUxQ"; // Replace with your actual YouTube API key
+    const apiKey = process.env.NEXT_PUBLIC_YOUTUBE_API_KEY;
     const response = await fetch(
       `https://www.googleapis.com/youtube/v3/videos?id=${videoId}&key=${apiKey}&part=snippet`
     );
@@ -261,189 +272,15 @@ const HomePage = () => {
       updatePlayerState(null, false, 0);
     }
   };
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setVideoUrl(e.target.value);
+  };
 
   useEffect(() => {
-    const storedUsername = localStorage.getItem("username");
-    if (storedUsername) {
-      setUsername(storedUsername);
-    } else {
-      const usernameInput = prompt("Please enter your username:");
-      if (usernameInput) {
-        setUsername(usernameInput);
-        localStorage.setItem("username", usernameInput);
-      }
+    if (videoUrl) {
+      handleSearch();
     }
-
-    if (!roomId) {
-      const newRoomId = Math.random().toString(36).substring(7);
-      router.push(`/room/${newRoomId}`);
-    } else {
-      socketRef.current = io("https://tubesync-production.up.railway.app");
-
-      socketRef.current.on("connect_error", (err) => {
-        console.error("Socket connection error:", err);
-        setError("Failed to connect to the server. Please try again later.");
-      });
-
-      socketRef.current.emit("joinRoom", roomId, isCreator);
-
-      socketRef.current.on("chatMessage", (message: ChatMessage) => {
-        setMessages((prevMessages) => [...prevMessages, message]);
-      });
-
-      socketRef.current.on("userCount", (count: number) => {
-        setUserCount(count);
-      });
-
-      socketRef.current.on("playlistUpdate", (updatedPlaylist: Video[]) => {
-        setPlaylist(updatedPlaylist);
-        if (updatedPlaylist.length > 0 && !currentVideo) {
-          setCurrentVideo(updatedPlaylist[0]);
-          updatePlayerState(updatedPlaylist[0].id, true, 0);
-        }
-      });
-
-      socketRef.current.on("playerStateUpdate", (state: PlayerState) => {
-        console.log("Received playerStateUpdate:", state);
-        if (!isLocalChange) {
-          const currentTime = playerRef.current?.getCurrentTime() || 0;
-          if (
-            Math.abs(Math.floor(currentTime) - Math.floor(state.currentTime)) >
-            syncThreshold
-          ) {
-            playerRef.current?.seekTo(state.currentTime);
-          }
-
-          setPlayerState(state);
-          if (playerRef.current) {
-            if (state.isPlaying) {
-              playerRef.current.playVideo();
-            } else {
-              playerRef.current.pauseVideo();
-            }
-          }
-        }
-        setIsLocalChange(false);
-      });
-
-      return () => {
-        socketRef.current?.disconnect();
-      };
-    }
-  }, [roomId, router, isCreator]);
-
-  const handleSendMessage = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (inputMessage.trim() && socketRef.current) {
-      const message: ChatMessage = {
-        user: username || "Anonymous",
-        text: inputMessage.trim(),
-      };
-      socketRef.current.emit("chatMessage", { roomId, message });
-      setInputMessage("");
-    }
-  };
-
-  const debouncedUpdatePlayerState = useCallback(
-    debounce((state: PlayerState) => {
-      console.log("Debounced player state update:", state);
-      socketRef.current?.emit("playerStateChange", { roomId, state });
-    }, 300),
-    [roomId]
-  );
-
-  const updatePlayerState = (
-    videoId: string | null,
-    isPlaying: boolean,
-    currentTime: number
-  ) => {
-    setIsLocalChange(true);
-    const newState: PlayerState = { videoId, isPlaying, currentTime };
-    setPlayerState(newState);
-    debouncedUpdatePlayerState(newState);
-  };
-
-  const onPlayerReady = (event: any) => {
-    playerRef.current = event.target;
-    console.log("Player ready");
-  };
-
-  const onPlayerStateChange = (event: any) => {
-    const playerStatus = event.data; // This should be the player state
-    const currentTime = event.target.getCurrentTime();
-    console.log(
-      `Player state changed: ${playerStatus}, Current time: ${currentTime}`
-    );
-
-    // Determine if the video is playing or paused
-    const isPlaying = playerStatus === YouTube.PlayerState.PLAYING;
-
-    // Emit player state change to the server immediately
-    const newState: PlayerState = {
-      videoId: currentVideo?.id || null,
-      isPlaying: isPlaying, // Set isPlaying based on the player status
-      currentTime: currentTime,
-    };
-
-    // Emit player state change to the server
-    socketRef.current?.emit("playerStateChange", { roomId, state: newState });
-
-    // Update local player state
-    setPlayerState((prevState) => ({
-      ...prevState,
-      isPlaying: isPlaying, // Update local state based on the player status
-      currentTime: currentTime,
-    }));
-  };
-
-  const synchronizeVideo = useCallback(() => {
-    if (playerRef.current && socketRef.current) {
-      const currentTime = playerRef.current.getCurrentTime();
-      const isPlaying =
-        playerRef.current.getPlayerState() === YouTube.PlayerState.PLAYING;
-      const videoId = currentVideo?.id || null;
-
-      if (Date.now() - lastUpdateTime > 5000) {
-        // Only sync every 5 seconds
-        console.log(
-          `Syncing video. VideoID: ${videoId} Time: ${currentTime}, Playing: ${isPlaying}`
-        );
-        socketRef.current?.emit("playerStateChange", {
-          roomId,
-          state: { videoId, isPlaying, currentTime },
-        });
-        setLastUpdateTime(Date.now());
-      }
-    }
-  }, [roomId, currentVideo, lastUpdateTime]);
-
-  useEffect(() => {
-    const syncInterval = setInterval(synchronizeVideo, 2000);
-    return () => clearInterval(syncInterval);
-  }, [synchronizeVideo]);
-
-  useEffect(() => {
-    const syncInterval = setInterval(() => {
-      if (playerRef.current) {
-        const currentTime = playerRef.current.getCurrentTime();
-        const isPlaying =
-          playerRef.current.getPlayerState() === YouTube.PlayerState.PLAYING;
-
-        // Emit the current state to the server
-        socketRef.current?.emit("playerStateChange", {
-          roomId,
-          state: {
-            videoId: playerState.videoId,
-            isPlaying,
-            currentTime,
-            isSystemUpdate: false,
-          },
-        });
-      }
-    }, 2000); // Sync every 2 seconds
-
-    return () => clearInterval(syncInterval);
-  }, [playerState.videoId]);
+  }, [videoUrl]);
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col">
@@ -459,20 +296,22 @@ const HomePage = () => {
           </Link>
         </div>
         <div className="flex items-center space-x-4">
-          <div className="relative w-full md:w-3/4">
-            <input
-              type="text"
-              placeholder="Paste YouTube URL here"
-              value={videoUrl}
-              onChange={(e) => setVideoUrl(e.target.value)}
-              className="p-2 pl-10 bg-gray-700 rounded w-60 lg:w-[510px]"
-              disabled={!isCreator}
-            />
-            <Search
-              className="absolute left-2 top-1/2 cursor-pointer transform -translate-y-1/2 text-gray-400"
-              onClick={handleSearch}
-            />
-          </div>
+          {/* Conditionally render the search input only for creators */}
+          {isCreator && (
+            <div className="relative w-full md:w-3/4">
+              <input
+                type="text"
+                placeholder="Paste YouTube URL here"
+                value={videoUrl}
+                onChange={handleInputChange}
+                className="p-2 pl-10 bg-gray-700 rounded w-60 lg:w-[510px]"
+              />
+              <Search
+                className="absolute left-2 top-1/2 cursor-pointer transform -translate-y-1/2 text-gray-400"
+                onClick={handleSearch} // Optional: still allow clicking the icon to search
+              />
+            </div>
+          )}
         </div>
         <div className="flex items-center text-gray-400 mr-8">
           <Users className="mr-2" />
@@ -493,32 +332,40 @@ const HomePage = () => {
                   height: "100%",
                   playerVars: {
                     autoplay: 1,
-                    controls: isCreator ? 1 : 0,
+                    controls: isCreator ? 1 : 0, // Show controls only for creators
                     modestbranding: 1,
                     rel: 0,
+                    cc_load_policy: 0, // Turn off captions for everyone
                   },
                 }}
                 className="w-full h-full"
                 onReady={onPlayerReady}
                 onStateChange={onPlayerStateChange}
-                onPlay={() =>
-                  isCreator &&
-                  updatePlayerState(
-                    playerState.videoId,
-                    true,
-                    playerRef.current?.getCurrentTime() || 0
-                  )
-                }
-                onPause={() =>
-                  isCreator &&
-                  updatePlayerState(
-                    playerState.videoId,
-                    false,
-                    playerRef.current?.getCurrentTime() || 0
-                  )
-                }
-                onEnd={() => isCreator && handleVideoEnd()}
+                onPlay={() => {
+                  if (isCreator) {
+                    updatePlayerState(
+                      playerState.videoId,
+                      true,
+                      playerRef.current?.getCurrentTime() || 0
+                    );
+                  }
+                }}
+                onPause={() => {
+                  if (isCreator) {
+                    updatePlayerState(
+                      playerState.videoId,
+                      false,
+                      playerRef.current?.getCurrentTime() || 0
+                    );
+                  }
+                }}
+                onEnd={() => {
+                  if (isCreator) {
+                    handleVideoEnd();
+                  }
+                }}
               />
+              {/* Removed the video title display */}
             </div>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-2xl">
@@ -564,8 +411,10 @@ const HomePage = () => {
                       key={index}
                       className="relative flex items-center space-x-2 bg-gray-700 p-2 rounded-lg cursor-pointer hover:bg-gray-600 transition-colors duration-100"
                       onClick={() => {
+                        // Allow all users to select a video
+                        setCurrentVideo(video);
+                        // Only update player state if the user is the creator
                         if (isCreator) {
-                          setCurrentVideo(video);
                           updatePlayerState(video.id, true, 0);
                         }
                       }}

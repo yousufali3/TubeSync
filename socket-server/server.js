@@ -1,13 +1,12 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "http://localhost:3000",
     methods: ["GET", "POST"],
   },
 });
@@ -25,8 +24,8 @@ io.on("connection", (socket) => {
     if (!rooms.has(roomId)) {
       // New room, set up room data
       rooms.set(roomId, {
-        creator: userId, // Set the creator to the unique user ID
-        users: new Set([userId]),
+        creator: userId,
+        users: new Map([[userId, { socketId: socket.id, username }]]),
         playlist: [],
         playerState: {
           videoId: null,
@@ -38,8 +37,8 @@ io.on("connection", (socket) => {
     } else {
       // Existing room, add user
       const room = rooms.get(roomId);
-      room.users.add(userId);
-      const isCreator = room.creator === userId; // Check if the current user is the creator
+      room.users.set(userId, { socketId: socket.id, username });
+      const isCreator = room.creator === userId;
       socket.emit("roomJoined", { isCreator });
     }
 
@@ -54,9 +53,9 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("chatMessage", message);
   });
 
-  socket.on("updatePlaylist", ({ roomId, playlist }) => {
+  socket.on("updatePlaylist", ({ roomId, playlist, userId }) => {
     const room = rooms.get(roomId);
-    if (room && room.creator === socket.id) {
+    if (room && room.creator === userId) {
       console.log(`Updating playlist for room: ${roomId}`);
       room.playlist = playlist;
       io.to(roomId).emit("playlistUpdate", playlist);
@@ -70,9 +69,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("playerStateChange", ({ roomId, state }) => {
+  socket.on("playerStateChange", ({ roomId, state, userId }) => {
     const room = rooms.get(roomId);
-    if (room && room.creator === socket.id) {
+    if (room && room.creator === userId) {
       console.log(`Updating player state for room ${roomId}:`, state);
       room.playerState = state;
       socket.to(roomId).emit("playerStateUpdate", state);
@@ -93,15 +92,22 @@ io.on("connection", (socket) => {
   const handleDisconnect = () => {
     console.log("User disconnected:", socket.id);
     for (const [roomId, room] of rooms.entries()) {
-      if (room.users.has(socket.id)) {
-        room.users.delete(socket.id);
+      const disconnectedUserId = Array.from(room.users.entries()).find(
+        ([_, user]) => user.socketId === socket.id
+      )?.[0];
+
+      if (disconnectedUserId) {
+        room.users.delete(disconnectedUserId);
         io.to(roomId).emit("userCount", room.users.size);
 
-        if (room.creator === socket.id) {
-          // Creator left, do not change the creator
-          console.log(
-            `Creator ${socket.id} left the room ${roomId}, but the creator will not change.`
-          );
+        if (room.creator === disconnectedUserId) {
+          // Creator left, transfer creator privileges
+          const newCreator = room.users.keys().next().value;
+          if (newCreator) {
+            room.creator = newCreator;
+            console.log(`New creator for room ${roomId}: ${newCreator}`);
+            io.to(roomId).emit("creatorChanged", { newCreator });
+          }
         }
 
         if (room.users.size === 0) {
