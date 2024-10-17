@@ -1,108 +1,127 @@
-// socket-server/server.js
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:3000", // Specify the client URL
+    origin: "*",
     methods: ["GET", "POST"],
   },
 });
 
-// Serve a simple HTML page for testing
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
-});
+// Store room data
+const rooms = new Map();
 
-// Store users in rooms
-const roomUsers = {};
-
-// Socket.io connection
 io.on("connection", (socket) => {
   console.log("New socket connected:", socket.id);
 
-  // Join room event
-  socket.on("joinRoom", (roomId) => {
-    console.log(`User ${socket.id} joined room: ${roomId}`);
+  socket.on("joinRoom", ({ roomId, username, userId }) => {
+    console.log(`User ${username} (${userId}) joined room: ${roomId}`);
     socket.join(roomId);
 
-    // Add user to the room
-    if (!roomUsers[roomId]) {
-      roomUsers[roomId] = [];
+    if (!rooms.has(roomId)) {
+      // New room, set up room data
+      rooms.set(roomId, {
+        creator: userId,
+        users: new Map([[userId, { socketId: socket.id, username }]]),
+        playlist: [],
+        playerState: {
+          videoId: null,
+          isPlaying: false,
+          currentTime: 0,
+        },
+      });
+      socket.emit("roomJoined", { isCreator: true });
+    } else {
+      // Existing room, add user
+      const room = rooms.get(roomId);
+      room.users.set(userId, { socketId: socket.id, username });
+      const isCreator = room.creator === userId;
+      socket.emit("roomJoined", { isCreator });
     }
-    roomUsers[roomId].push(socket.id);
 
-    // Notify other users in the room
-    const usersInRoom = roomUsers[roomId];
-    socket.to(roomId).emit("userJoined", {
-      message: `User ${socket.id} has joined the room.`,
-      users: usersInRoom,
-    });
-
-    // Emit the current user count to the room
-    io.to(roomId).emit("userCount", usersInRoom.length);
+    const room = rooms.get(roomId);
+    io.to(roomId).emit("userCount", room.users.size);
+    socket.emit("playlistUpdate", room.playlist);
+    socket.emit("playerStateUpdate", room.playerState);
   });
 
-  // Chat message event
   socket.on("chatMessage", ({ roomId, message }) => {
     console.log(`Chat message in room ${roomId}:`, message);
     io.to(roomId).emit("chatMessage", message);
   });
 
-  // Video playlist update event
-  socket.on("updatePlaylist", ({ roomId, playlist }) => {
-    console.log(`Received updatePlaylist for room: ${roomId}`);
-    console.log("New Playlist:", playlist);
-    io.to(roomId).emit("playlistUpdate", playlist);
-  });
+  socket.on("updatePlaylist", ({ roomId, playlist, userId }) => {
+    const room = rooms.get(roomId);
+    if (room && room.creator === userId) {
+      console.log(`Updating playlist for room: ${roomId}`);
+      room.playlist = playlist;
+      io.to(roomId).emit("playlistUpdate", playlist);
 
-  // Player state change event
-  socket.on("playerStateChange", ({ roomId, state }) => {
-    console.log("hello World");
-    console.log(`Player state change received for room ${roomId}:`, state);
-    // Emit the player state update to all users in the room except the sender
-    socket.to(roomId).emit("playerStateUpdate", state);
-  });
-
-  // Leave room event
-  socket.on("leaveRoom", (roomId) => {
-    socket.leave(roomId);
-    console.log(`User left room: ${roomId}`);
-
-    // Remove user from the room
-    if (roomUsers[roomId]) {
-      roomUsers[roomId] = roomUsers[roomId].filter((id) => id !== socket.id);
-      socket.to(roomId).emit("userLeft", {
-        message: `User ${socket.id} has left the room.`,
-        users: roomUsers[roomId],
-      });
-      io.to(roomId).emit("userCount", roomUsers[roomId].length);
+      if (playlist.length > 0 && !room.playerState.videoId) {
+        room.playerState.videoId = playlist[0].id;
+        io.to(roomId).emit("playerStateUpdate", room.playerState);
+      }
+    } else {
+      console.log(`Unauthorized playlist update attempt in room: ${roomId}`);
     }
   });
 
-  // Handle user disconnection
-  socket.on("disconnect", () => {
-    console.log("User disconnected");
+  socket.on("playerStateChange", ({ roomId, state, userId }) => {
+    const room = rooms.get(roomId);
+    if (room && room.creator === userId) {
+      console.log(`Updating player state for room ${roomId}:`, state);
+      room.playerState = state;
+      socket.to(roomId).emit("playerStateUpdate", state);
+    } else {
+      console.log(
+        `Unauthorized player state change attempt in room: ${roomId}`
+      );
+    }
+  });
 
-    // Remove user from all rooms
-    for (const roomId in roomUsers) {
-      roomUsers[roomId] = roomUsers[roomId].filter((id) => id !== socket.id);
-      if (roomUsers[roomId].length) {
-        socket.to(roomId).emit("userLeft", {
-          message: `User ${socket.id} has disconnected.`,
-          users: roomUsers[roomId],
-        });
-        io.to(roomId).emit("userCount", roomUsers[roomId].length);
+  socket.on("requestSync", ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room) {
+      socket.emit("playerStateUpdate", room.playerState);
+    }
+  });
+
+  const handleDisconnect = () => {
+    console.log("User disconnected:", socket.id);
+    for (const [roomId, room] of rooms.entries()) {
+      const disconnectedUserId = Array.from(room.users.entries()).find(
+        ([_, user]) => user.socketId === socket.id
+      )?.[0];
+
+      if (disconnectedUserId) {
+        room.users.delete(disconnectedUserId);
+        io.to(roomId).emit("userCount", room.users.size);
+
+        if (room.creator === disconnectedUserId) {
+          // Creator left, transfer creator privileges
+          const newCreator = room.users.keys().next().value;
+          if (newCreator) {
+            room.creator = newCreator;
+            console.log(`New creator for room ${roomId}: ${newCreator}`);
+            io.to(roomId).emit("creatorChanged", { newCreator });
+          }
+        }
+
+        if (room.users.size === 0) {
+          rooms.delete(roomId);
+          console.log(`Room ${roomId} closed due to no users`);
+        }
       }
     }
-  });
+  };
+
+  socket.on("leaveRoom", handleDisconnect);
+  socket.on("disconnect", handleDisconnect);
 });
 
-// Start the server
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Socket server running on port ${PORT}`);
