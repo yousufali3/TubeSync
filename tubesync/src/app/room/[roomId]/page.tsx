@@ -324,7 +324,11 @@ const HomePage = () => {
         {/* Video section */}
         <div className="w-full md:w-3/4 bg-black flex-grow relative h-[300px] md:h-[600px] lg:h-[620px]">
           {playerState.videoId ? (
-            <div className="absolute inset-0">
+              <div
+              className={`absolute inset-0 ${
+                !isCreator ? "pointer-events-none" : ""
+              }`}
+            >
               <YouTube
                 videoId={playerState.videoId || ""}
                 opts={{
